@@ -3,77 +3,45 @@
 
 $configureCommon=<<-SHELL
 
-  # apt-get update
-  # apt-get upgrade -y
-
-  ## cni plugins
-  mkdir -p /opt/cni/bin
-  curl -sSL https://github.com/containernetworking/plugins/releases/download/v0.7.5/cni-plugins-amd64-v0.7.5.tgz | tar xzf - -C /opt/cni/bin
-
-  
-  route add -net 192.168.90.0/24 gw 192.168.33.1
-  cat <<EOF > /etc/rc.local
-#!/bin/sh -e
-#
-route add -net 192.168.90.0/24 gw 192.168.33.1
-
-exit 0
-EOF
-  chmod 0755 /etc/rc.local
-
-  # for kube-proxy (iptables)
-  #
-  echo net.bridge.bridge-nf-call-iptables=1 >> /etc/sysctl.conf
-  modprobe br_netfilter
-  sysctl -p
-
-SHELL
-
-$configureMaster=<<-SHELL
 
   # Store private network IP address in variable
   IPADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
 
   # Deploy k3s, turn off flannel, specify private IP as kubelet's IP, disable loadbalancer and traefik
-  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--no-flannel --no-deploy=servicelb --no-deploy=traefik --node-ip=${IPADDR}" sh -
+  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=" --disable=servicelb --disable=traefik   --write-kubeconfig-mode 644 " sh -
 
-  ## Deploy flannel, custom file with updated iface name and k3s network cidr
-  kubectl apply -f /vagrant/kube-flannel.yml
 
-  ## Place token for agent registration in shared folder
-  cp /var/lib/rancher/k3s/server/node-token /vagrant/token
-  
-  curl -s https://raw.githubusercontent.com/google/metallb/v0.7.3/manifests/metallb.yaml >  /root/metallb.yaml
-  sed  -i '1i ---' /root/metallb.yaml
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  export PATH=/usr/local/bin:$PATH
+
+  kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.9/config/manifests/metallb-native.yaml
+
   cat << EOF > /root/metallb_configmap.yaml
----  
-apiVersion: v1
-kind: ConfigMap
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
 metadata:
+  name: first-pool
   namespace: metallb-system
-  name: config
-data:
-  config: |
-    peers:
-    - my-asn: 64522
-      peer-asn: 64512
-      peer-address: 192.168.33.1
-      peer-port: 179
-      router-id: 192.168.33.1
-    address-pools:
-    - name: my-ip-space
-      protocol: bgp
-      avoid-buggy-ips: true
-      addresses:
-      - 192.168.90.192/26
+spec:
+  addresses:
+  - ${IPADDR}/32
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: first-pool
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - first-pool
+  interfaces:
+  - eth1
+---  
 EOF
-  kubectl apply -f /root/metallb.yaml
+
   kubectl apply -f /root/metallb_configmap.yaml
   # deployment
-  kubectl run source-ip-app --image=k8s.gcr.io/echoserver:1.4
-  kubectl expose deployment source-ip-app --name=loadbalancer --port=80 --target-port=8080 --type=LoadBalancer
-  kubectl get svc loadbalancer
-  kubectl patch svc loadbalancer -p '{"spec":{"externalTrafficPolicy":"Local"}}'
   
 SHELL
 
